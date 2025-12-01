@@ -1,0 +1,12 @@
+# requirements.txt
+pandas
+numpy
+streamlit
+plotly
+scikit-learn
+statsmodels
+joblib
+sqlalchemy
+psycopg2-binary
+connectorx
+polars
