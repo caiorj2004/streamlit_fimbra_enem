@@ -1,13 +1,13 @@
 # requirements.txt
 pandas
-numpy==1.26.4
+numpy==1.24.4
 streamlit
 plotly
-scikit-learn==1.4.2  # Versão recomendada para compatibilidade de pickle
+scikit-learn==1.3.0  # Usaremos a versão 1.3.0 (mais estável)
 statsmodels
 joblib
 sqlalchemy
 psycopg2-binary
 connectorx
 polars
-scipy==1.12.0
+scipy==1.11.1
