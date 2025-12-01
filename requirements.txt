@@ -1,13 +1,13 @@
 # requirements.txt
 pandas
-numpy==1.24.4
+numpy
 streamlit
 plotly
-scikit-learn==1.3.0  # Usaremos a versão 1.3.0 (mais estável)
+scikit-learn
 statsmodels
 joblib
 sqlalchemy
 psycopg2-binary
 connectorx
 polars
-scipy==1.11.1
+scipy
