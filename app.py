@@ -318,13 +318,12 @@ with tabs[1]:
 with tabs[2]:
     st.header("Modelagem Preditiva e Previsão Interativa")
     
+    # 1. Checa se os artefatos foram carregados
     if model and preprocessor:
         st.success("Modelos RFR e Pré-processador carregados com sucesso.")
         
-        # --- DISCUSSÃO DOS MODELOS E CONTEXTUALIZAÇÃO ---
-        
+        # --- DISCUSSÃO DOS MODELOS ---
         st.subheader("Resultados Chave do Modelo (RFR Vencedor)")
-        
         st.markdown("""
         O modelo **Random Forest Regressor (RFR)** foi selecionado por apresentar o melhor equilíbrio entre ajuste e generalização para a natureza não-linear dos dados de gasto. A modelagem preditiva resultou nas seguintes métricas no conjunto de teste:
         """)
@@ -343,7 +342,7 @@ with tabs[2]:
         
         st.markdown("---")
         
-        # --- Lógica de Previsão Interativa (Input Widgets) ---
+        # --- Lógica de Previsão Interativa (Inputs e Botão) ---
         st.subheader("Previsão Interativa: Simulação de Gasto Municipal (26 Funções Sociais)")
         
         # Criar a estrutura de input
@@ -351,17 +350,16 @@ with tabs[2]:
         todas_as_features_do_modelo = FEATURES_SCALED_NOMES # Lista das 26 colunas RAW com sufixo
         input_cols = st.columns(3)
         
+        # 1. CRIAÇÃO DOS WIDGETS
         for i, feature_full_name in enumerate(todas_as_features_do_modelo):
             feature_name_sem_sufixo = feature_full_name.replace('_per_capita', '')
             
-            # 1. Tentar obter o valor mediano BRUTO do DF Long (Para valor default realista)
+            # Tentar obter o valor mediano BRUTO do DF Long (Para valor default realista)
             try:
-                # O df_long está no formato LONG. Filtramos pelo nome bruto da função
                 default_value = float(df_long[df_long[FEATURE_NAME_COL] == feature_name_sem_sufixo][FEATURE_VALUE_COL].median())
             except:
                 default_value = 100.0 # Valor padrão
                 
-            # 2. Criar o widget
             # A chave do dicionário 'inputs' é o nome SEM o sufixo (para consistência de input)
             inputs[feature_name_sem_sufixo] = input_cols[i % 3].number_input(
                 f"Gasto em {feature_name_sem_sufixo.title()} (R$/capita)",
@@ -374,31 +372,32 @@ with tabs[2]:
         
         if predict_button:
             
-            # --- 1. CONSTRUÇÃO ROBUSTA DO DATAFRAME DE INPUT (28 colunas) ---
+            # --- 2. CONSTRUÇÃO ROBUSTA DO DATAFRAME DE INPUT (Executado SOMENTE no clique) ---
             
             todas_features_com_sufixo = FEATURES_SCALED_NOMES 
             data_para_preprocessor = {}
             
-            # 1.1. Preenche TODAS as 26 FEATURES BRUTAS (Input Real ou Default Zero)
+            # 2.1. Preenche TODAS as 26 FEATURES BRUTAS (Input Real ou Default Zero)
             for feature_full_name in todas_features_com_sufixo:
                 feature_name_sem_sufixo = feature_full_name.replace('_per_capita', '')
                 input_valor = inputs.get(feature_name_sem_sufixo, 0.0) 
                 data_para_preprocessor[feature_full_name] = [input_valor]
                 
-            # 1.2. Adicionar as 2 Colunas DUMMY (Passthrough)
+            # 2.2. Adicionar as 2 Colunas DUMMY (Passthrough)
             data_para_preprocessor[ID_COL] = [0]      
             data_para_preprocessor[NOTA_ALVO] = [0.0] 
             
             input_df_final = pd.DataFrame(data_para_preprocessor)
 
-            # 2. REORDENAR E TRANSFORMAR
+            # 2.3. REORDENAR E TRANSFORMAR
             ORDEM_ESPERADA_PELO_PREPROCESSOR = todas_features_com_sufixo + [ID_COL, NOTA_ALVO]
             input_df_final = input_df_final[ORDEM_ESPERADA_PELO_PREPROCESSOR]
             
-            # ATENÇÃO: Se o preprocessor falhar (AttributeError), a linha abaixo é a fonte.
+            # ATENÇÃO: A linha abaixo é a fonte do AttributeError. Se o problema persistir, 
+            # a falha é na serialização do objeto preprocessor.pkl no GitHub.
             input_transformed = preprocessor.transform(input_df_final) 
             
-            # 3. PREVISÃO
+            # 2.4. PREVISÃO
             X_predict = input_transformed[:, :-2] 
             prediction = model.predict(X_predict)
             
