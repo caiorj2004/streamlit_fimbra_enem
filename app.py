@@ -23,6 +23,7 @@ FEATURE_VALUE_COL = 'despesa_per_capita'
 FEATURE_NAME_COL = 'descricao_conta'
 # Nomes dos Artefatos Serializados
 NOME_MODELO_SERIALIZADO = 'models/rfr_model.pkl'
+NOME_PREPROCESSOR = 'models/preprocessor_fimbra_scaled.pkl'
 NOME_ARQUIVO_DF_LONG_EDA = 'models/df_eda_long_format.pkl'
 NOME_ARQUIVO_DF_FILTERS_EDA = 'models/df_eda_filters.pkl'
 
@@ -44,88 +45,93 @@ def carregar_dados_eda():
         return df_long_loaded, df_filters_loaded
     
     except FileNotFoundError:
-        st.error("ERRO CRÍTICO: Arquivos de dados de EDA não encontrados! Execute o 'python run_pipeline.py'.")
+        st.error(
+            "ERRO CRÍTICO: Arquivos de dados de EDA não encontrados! "
+            "Execute o 'python run_pipeline.py' para gerar os arquivos .pkl na pasta 'models/'."
+        )
         return pd.DataFrame(), pd.DataFrame()
 
 
 @st.cache_resource
-def carregar_modelos_serializados(df_dados_brutos_long): # Recebe o df_long
+def carregar_modelos_serializados(df_dados_brutos):
     """
-    Carrega o modelo RFR e RECONSTRÓI o preprocessor, ajustando-o no DF Wide.
+    Carrega o modelo RFR e RECONSTRÓI o preprocessor e ajusta (fit) nos dados EDA.
+    Isto resolve o erro de desserialização (AttributeError).
     """
     try:
-        # Carrega o modelo
+        # Carrega o modelo (Mais estável)
         model = joblib.load(NOME_MODELO_SERIALIZADO)
     except Exception:
-        st.error("Falha ao carregar o modelo RFR. Verifique o arquivo .pkl.")
         return None, None, []
 
-    # 1. Obter a lista de features brutas (que o modelo espera)
-    # Tenta carregar a lista de features do preprocessor quebrado (se o arquivo existir)
+    # 1. Definir features brutas (LISTA FINAL DE VIF)
     try:
+        # Tenta carregar a lista de features do preprocessor quebrado para ter os nomes exatos
         preprocessor_dump = joblib.load("models/preprocessor_fimbra_scaled.pkl")
-        features_finais_raw = preprocessor_dump.transformers_[0][2] # Ex: ['Saúde_per_capita', ...]
+        features_finais_raw = preprocessor_dump.transformers_[0][2]
     except Exception:
-        st.error("Falha ao ler a estrutura do preprocessor. Ajuste cancelado.")
-        return model, None, []
-
-    # 2. **CRITICAL FIX:** Criar o DF Wide necessário para o FIT
-    #    Chama a função de pivotagem (que está definida no app.py)
-    df_wide_fit = criar_df_wide_para_ranking(df_dados_brutos_long)
-
-    # 3. Reconstruir o ColumnTransformer em código
+        # Se falhar, assume-se que todas as colunas _per_capita do DF foram as usadas
+        features_finais_raw = [c for c in df_dados_brutos.columns if c.endswith('_per_capita')]
+        
+    
+    # 2. Reconstruir o ColumnTransformer em código (SOLUÇÃO CONTRA ATRIBUTO FALTANTE)
+    
     # Replicamos o pipeline de transformação: QuantileTransformer + StandardScaler
     transformador_numerico = Pipeline(steps=[
-        ('quantile', QuantileTransformer(output_distribution='normal', n_quantiles=df_wide_fit.shape[0], random_state=42)),
+        ('quantile', QuantileTransformer(output_distribution='normal', n_quantiles=df_dados_brutos.shape[0], random_state=42)),
         ('scaler', StandardScaler())
     ])
     
     preprocessor = ColumnTransformer(
         transformers=[
-            # O transformador agora usa as colunas 'Saúde_per_capita', etc., que existem no df_wide_fit
-            ('num', transformador_numerico, features_finais_raw) 
+            ('num', transformador_numerico, features_finais_raw)
         ],
         remainder='passthrough',
         n_jobs=-1
     )
     
-    # 4. Ajustar (FIT) o preprocessor ao DF Wide
+    # 3. Ajustar (FIT) o preprocessor aos dados brutos (df_long)
     try:
+        # Prepara o DF para o FIT: FEATURES_FINAIS_RAW + [ID_COL, NOTA_ALVO]
         cols_para_fit = features_finais_raw + [ID_COL, NOTA_ALVO]
-        # O fit é feito no DF Wide, que contém as colunas 'Saúde_per_capita'
-        preprocessor.fit(df_wide_fit[cols_para_fit].fillna(0)) 
+        
+        # O fit é feito no DF completo e limpo de EDA
+        preprocessor.fit(df_dados_brutos[cols_para_fit].fillna(0)) 
     except Exception as e:
-        st.error(f"Erro CRÍTICO ao REAJUSTAR o preprocessor (FIT). Colunas: {e}")
+        st.error(f"Erro CRÍTICO ao REAJUSTAR o preprocessor (FIT). A lista de colunas pode estar errada: {e}")
         return model, None, features_finais_raw
 
-    # Retorna o modelo, o preprocessor nativo e a lista de features usadas
     return model, preprocessor, features_finais_raw
 
 
 # ----------------------------------------
 # 3. Funções de Visualização e Manipulação
 # ----------------------------------------
-# ... (Funções plot_histograma_notas, plot_boxplots_despesas_long, plot_heatmap_correlacao_long_to_wide e criar_df_wide_para_ranking) ...
 
-# FUNÇÃO AUXILIAR: PIVOTAGEM LOCAL (Cria o DF Wide necessário para Rankings) - ADICIONADA AQUI
+# FUNÇÃO AUXILIAR: PIVOTAGEM LOCAL (Cria o DF Wide necessário para Rankings)
 @st.cache_data
 def criar_df_wide_para_ranking(df_long):
     """
     Cria um DataFrame Wide (Notas + Todas Despesas Per Capita) para rankings rápidos.
     """
+    # 1. Lista DINÂMICA de todas as funções FIMBRA disponíveis no DF Long
     funcoes_completas = df_long[FEATURE_NAME_COL].unique().tolist()
     funcoes_completas = [f for f in funcoes_completas if isinstance(f, str) and f.strip() != '']
     
+    # 2. Pivotagem das despesas
     df_wide_features = df_long.pivot_table(
         index=ID_COL, 
         columns=FEATURE_NAME_COL, 
         values=FEATURE_VALUE_COL
     ).fillna(0).reset_index()
 
+    # 3. Renomeia e adiciona sufixo _per_capita
+    # A lista de colunas que serão renomeadas deve ser baseada no DF Wide pivotado
     cols_to_rename = [c for c in df_wide_features.columns if c not in [ID_COL] + NOTAS_DISPONIVEIS]
     new_cols = {col: f'{col}_per_capita' for col in cols_to_rename}
     df_wide_features.rename(columns=new_cols, inplace=True)
     
+    # 4. Merge com as Notas/Detalhes do DF Long (para ter nome/UF/Notas)
     cols_detalhes = [ID_COL, 'nome_municipio', 'sigla_uf', 'faixa_populacao'] + NOTAS_DISPONIVEIS
     df_detalhes_unique = df_long.drop_duplicates(subset=[ID_COL])[cols_detalhes].set_index(ID_COL)
     
@@ -179,7 +185,7 @@ st.title("Análise FIMBRA x ENEM")
 # 1. Carrega DataFrames de EDA (df_long é criado aqui)
 df_long, df_enem_agg = carregar_dados_eda()
 
-# 2. Carrega Modelos (Usando df_long como argumento - Agora é passado)
+# 2. Carrega Modelos (Usando df_long como argumento)
 model, preprocessor, FEATURES_SCALED_NOMES = carregar_modelos_serializados(df_long) 
 
 
@@ -192,7 +198,6 @@ tabs = st.tabs(["Apresentação e Contexto", "Análise Exploratória (EDA)", "Mo
 # 4a. Aba Apresentação (Mantida)
 # -------------------
 with tabs[0]:
-    # ... (Conteúdo da apresentação) ...
     st.header("Contexto e Metodologia: Gastos Sociais e o Desempenho Escolar")
     
     st.markdown("""
@@ -381,7 +386,8 @@ with tabs[1]:
 with tabs[2]:
     st.header("Modelagem Preditiva e Previsão Interativa")
     
-    if model and preprocessor:
+    # OBS: O erro de serialização ainda pode ocorrer nesta linha.
+    if model and preprocessor: 
         st.success("Modelos RFR e Pré-processador carregados com sucesso.")
         
         # --- DISCUSSÃO DOS MODELOS E CONTEXTUALIZAÇÃO ---
@@ -486,4 +492,3 @@ with tabs[2]:
 
     else:
         st.warning("Modelos não encontrados. Execute o run_pipeline.py para treinar e serializar os modelos.")
-
