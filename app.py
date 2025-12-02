@@ -49,56 +49,54 @@ def carregar_dados_eda():
 
 
 @st.cache_resource
-def carregar_modelos_serializados(df_dados_brutos): # Recebe df_long
+def carregar_modelos_serializados(df_dados_brutos_long): # Recebe o df_long
     """
-    Carrega o modelo RFR e RECONSTRÓI o preprocessor no código (solução definitiva).
+    Carrega o modelo RFR e RECONSTRÓI o preprocessor, ajustando-o no DF Wide.
     """
     try:
-        # Carrega o modelo (Mais estável)
+        # Carrega o modelo
         model = joblib.load(NOME_MODELO_SERIALIZADO)
     except Exception:
+        st.error("Falha ao carregar o modelo RFR. Verifique o arquivo .pkl.")
         return None, None, []
 
-    # 1. Definir features brutas (LISTA FINAL DE VIF)
-    # Como o arquivo .pkl está quebrado, essa lista DEVE SER HARDCODED ou obtida de um artefato simples.
-    # Assumindo que a lista de VIF final é salva em um artefato que podemos carregar, 
-    # ou que é extraída do preprocessor quebrado (o que é arriscado).
-    
-    # Tentativa de carregar a lista de features do preprocessor (PODE FALHAR, mas é o que temos):
+    # 1. Obter a lista de features brutas (que o modelo espera)
+    # Tenta carregar a lista de features do preprocessor quebrado (se o arquivo existir)
     try:
         preprocessor_dump = joblib.load("models/preprocessor_fimbra_scaled.pkl")
-        features_finais_raw = preprocessor_dump.transformers_[0][2]
+        features_finais_raw = preprocessor_dump.transformers_[0][2] # Ex: ['Saúde_per_capita', ...]
     except Exception:
-        # Se falhar, usamos uma lista de fallback para evitar quebra no fit:
-        features_finais_raw = [c for c in df_dados_brutos.columns if c.endswith('_per_capita')]
-        
-    
-    # 2. Reconstruir o ColumnTransformer em código
+        st.error("Falha ao ler a estrutura do preprocessor. Ajuste cancelado.")
+        return model, None, []
+
+    # 2. **CRITICAL FIX:** Criar o DF Wide necessário para o FIT
+    #    Chama a função de pivotagem (que está definida no app.py)
+    df_wide_fit = criar_df_wide_para_ranking(df_dados_brutos_long)
+
+    # 3. Reconstruir o ColumnTransformer em código
     # Replicamos o pipeline de transformação: QuantileTransformer + StandardScaler
-    
-    # Pipeline Numérico
     transformador_numerico = Pipeline(steps=[
-        ('quantile', QuantileTransformer(output_distribution='normal', n_quantiles=df_dados_brutos.shape[0], random_state=42)),
+        ('quantile', QuantileTransformer(output_distribution='normal', n_quantiles=df_wide_fit.shape[0], random_state=42)),
         ('scaler', StandardScaler())
     ])
     
-    # ColumnTransformer
     preprocessor = ColumnTransformer(
         transformers=[
-            ('num', transformador_numerico, features_finais_raw)
+            # O transformador agora usa as colunas 'Saúde_per_capita', etc., que existem no df_wide_fit
+            ('num', transformador_numerico, features_finais_raw) 
         ],
         remainder='passthrough',
         n_jobs=-1
     )
     
-    # 3. Ajustar (FIT) o preprocessor aos dados brutos (df_long)
-    # Isso gera um objeto de preprocessor 100% nativo do ambiente Streamlit Cloud.
+    # 4. Ajustar (FIT) o preprocessor ao DF Wide
     try:
         cols_para_fit = features_finais_raw + [ID_COL, NOTA_ALVO]
-        preprocessor.fit(df_dados_brutos[cols_para_fit].fillna(0)) # Fillna(0) para garantir estabilidade no fit
+        # O fit é feito no DF Wide, que contém as colunas 'Saúde_per_capita'
+        preprocessor.fit(df_wide_fit[cols_para_fit].fillna(0)) 
     except Exception as e:
-        st.error(f"Erro CRÍTICO ao REAJUSTAR o preprocessor (FIT): {e}")
-        return model, None, features_finais_raw # Retorna None se o fit falhar
+        st.error(f"Erro CRÍTICO ao REAJUSTAR o preprocessor (FIT). Colunas: {e}")
+        return model, None, features_finais_raw
 
     # Retorna o modelo, o preprocessor nativo e a lista de features usadas
     return model, preprocessor, features_finais_raw
@@ -488,3 +486,4 @@ with tabs[2]:
 
     else:
         st.warning("Modelos não encontrados. Execute o run_pipeline.py para treinar e serializar os modelos.")
+
