@@ -52,9 +52,9 @@ def carregar_dados_eda():
 
 
 @st.cache_resource
-def carregar_modelos_serializados(df_dados_brutos):
+def carregar_modelos_serializados(df_dados_brutos): # Recebe o df_long
     """
-    Carrega o modelo RFR e RECONSTRÓI o preprocessor no código (solução definitiva).
+    Carrega o modelo RFR e RECONSTRÓI o preprocessor, ajustando-o no DF Wide.
     """
     try:
         # 1. Carrega o modelo RFR (Mais estável)
@@ -62,45 +62,48 @@ def carregar_modelos_serializados(df_dados_brutos):
     except Exception:
         return None, None, []
 
-    # 2. DEFINIÇÃO DA LISTA DE FEATURES BRUTAS
+    # 2. **CORREÇÃO CRÍTICA:** PIVOTAR O DF LONG PARA O FORMATO WIDE PARA AJUSTE (FIT)
+    # df_wide_fit CONTÉM as colunas 'Saúde_per_capita', etc.
     try:
-        # Tenta carregar a lista de features do preprocessor quebrado para ter os nomes exatos
+        df_wide_fit = criar_df_wide_para_ranking(df_dados_brutos)
+    except Exception as e:
+        st.error(f"Erro na Pivotagem (criar_df_wide_para_ranking): {e}")
+        return None, None, []
+    
+    # 3. Definição da Lista de Features
+    # Tentativa de carregar a lista de features do preprocessor quebrado para ter os nomes exatos
+    try:
         preprocessor_dump = joblib.load("models/preprocessor_fimbra_scaled.pkl")
         features_finais_raw = preprocessor_dump.transformers_[0][2]
     except Exception:
-        # Se falhar, usa as colunas _per_capita que existem no DF Long
-        features_finais_raw = [c for c in df_dados_brutos.columns if c.endswith('_per_capita')]
+        # Se a desserialização falhar, usamos as colunas do DF Wide reconstruído
+        features_finais_raw = [c for c in df_wide_fit.columns if c.endswith('_per_capita')]
         
     
-    # 3. Reconstruir o ColumnTransformer em código
+    # 4. Reconstruir o ColumnTransformer em código
     
-    # CORREÇÃO CRÍTICA: Fixar n_quantiles em um valor seguro (1000)
-    N_QUANTILES_SEGURO = 1000 
+    N_QUANTILES_SEGURO = 1000 # Valor seguro contra erro matemático
     
-    # Pipeline Numérico
     transformador_numerico = Pipeline(steps=[
-        # CORREÇÃO: Usa n_quantiles fixo para resolver o erro matemático
-        ('quantile', QuantileTransformer(output_distribution='normal', 
-                                         n_quantiles=N_QUANTILES_SEGURO, 
-                                         random_state=42)),
+        ('quantile', QuantileTransformer(output_distribution='normal', n_quantiles=N_QUANTILES_SEGURO, random_state=42)),
         ('scaler', StandardScaler())
     ])
     
     preprocessor = ColumnTransformer(
         transformers=[
-            ('num', transformador_numerico, features_finais_raw)
+            ('num', transformador_numerico, features_finais_raw) # O transformador usa as colunas brutas
         ],
         remainder='passthrough',
         n_jobs=-1
     )
     
-    # 4. Ajustar (FIT) o preprocessor aos dados brutos (df_long)
+    # 5. Ajustar (FIT) o preprocessor ao DF WIDE
     try:
-        # Prepara o DF para o FIT: FEATURES_FINAIS_RAW + [ID_COL, NOTA_ALVO]
+        # Colunas que o preprocessor precisa ver para o FIT: FEATURES_FINAIS_RAW + [ID_COL, NOTA_ALVO]
         cols_para_fit = features_finais_raw + [ID_COL, NOTA_ALVO]
         
-        # O fit é feito no DF completo e limpo de EDA
-        preprocessor.fit(df_dados_brutos[cols_para_fit].fillna(0)) 
+        # O fit é feito no DF WIDE, que contém todas as FEATURES e as colunas passthrough
+        preprocessor.fit(df_wide_fit[cols_para_fit].fillna(0)) 
     except Exception as e:
         st.error(f"Erro CRÍTICO ao REAJUSTAR o preprocessor (FIT). Falha: {e}")
         return model, None, features_finais_raw
@@ -492,5 +495,6 @@ with tabs[2]:
 
     else:
         st.warning("Modelos não encontrados. Execute o run_pipeline.py para treinar e serializar os modelos.")
+
 
 
