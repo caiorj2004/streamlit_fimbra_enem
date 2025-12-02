@@ -51,63 +51,59 @@ def carregar_dados_eda():
         return pd.DataFrame(), pd.DataFrame()
 
 
-@st.cache_resource
-def carregar_modelos_serializados(df_dados_brutos): # Recebe o df_long
-    """
-    Carrega o modelo RFR e RECONSTRÓI o preprocessor, ajustando-o no DF Wide.
-    """
-    try:
-        # 1. Carrega o modelo RFR (Mais estável)
-        model = joblib.load(NOME_MODELO_SERIALIZADO)
-    except Exception:
-        return None, None, []
+# Variáveis de apoio necessárias para o treinamento no Cloud
+RANDOM_STATE = 42
 
-    # 2. **CORREÇÃO CRÍTICA:** PIVOTAR O DF LONG PARA O FORMATO WIDE PARA AJUSTE (FIT)
-    # df_wide_fit CONTÉM as colunas 'Saúde_per_capita', etc.
-    try:
-        df_wide_fit = criar_df_wide_para_ranking(df_dados_brutos)
-    except Exception as e:
-        st.error(f"Erro na Pivotagem (criar_df_wide_para_ranking): {e}")
-        return None, None, []
+@st.cache_resource
+def carregar_modelos_serializados(df_dados_brutos):
+    """
+    RECONSTRÓI o preprocessor e o modelo RFR no código do Streamlit Cloud.
+    """
     
-    # 3. Definição da Lista de Features
-    # Tentativa de carregar a lista de features do preprocessor quebrado para ter os nomes exatos
+    # 1. Definir features brutas (LISTA FINAL DE VIF)
     try:
+        # Tenta carregar a lista de features do preprocessor quebrado para ter os nomes exatos
         preprocessor_dump = joblib.load("models/preprocessor_fimbra_scaled.pkl")
         features_finais_raw = preprocessor_dump.transformers_[0][2]
     except Exception:
-        # Se a desserialização falhar, usamos as colunas do DF Wide reconstruído
-        features_finais_raw = [c for c in df_wide_fit.columns if c.endswith('_per_capita')]
+        st.error("Falha na desserialização da lista de features VIF.")
+        return None, None, []
         
-    
-    # 4. Reconstruir o ColumnTransformer em código
-    
-    N_QUANTILES_SEGURO = 1000 # Valor seguro contra erro matemático
-    
+    # 2. Reconstruir e Ajustar (FIT) o Preprocessor (como feito no passo anterior)
+    N_QUANTILES_SEGURO = 1000 
     transformador_numerico = Pipeline(steps=[
-        ('quantile', QuantileTransformer(output_distribution='normal', n_quantiles=N_QUANTILES_SEGURO, random_state=42)),
+        ('quantile', QuantileTransformer(output_distribution='normal', n_quantiles=N_QUANTILES_SEGURO, random_state=RANDOM_STATE)),
         ('scaler', StandardScaler())
     ])
-    
     preprocessor = ColumnTransformer(
         transformers=[
-            ('num', transformador_numerico, features_finais_raw) # O transformador usa as colunas brutas
+            ('num', transformador_numerico, features_finais_raw)
         ],
         remainder='passthrough',
         n_jobs=-1
     )
-    
-    # 5. Ajustar (FIT) o preprocessor ao DF WIDE
-    try:
-        # Colunas que o preprocessor precisa ver para o FIT: FEATURES_FINAIS_RAW + [ID_COL, NOTA_ALVO]
-        cols_para_fit = features_finais_raw + [ID_COL, NOTA_ALVO]
-        
-        # O fit é feito no DF WIDE, que contém todas as FEATURES e as colunas passthrough
-        preprocessor.fit(df_wide_fit[cols_para_fit].fillna(0)) 
-    except Exception as e:
-        st.error(f"Erro CRÍTICO ao REAJUSTAR o preprocessor (FIT). Falha: {e}")
-        return model, None, features_finais_raw
+    # Fit no DF Wide reconstruído (usa o df_wide_fit do EDA)
+    df_wide_fit = criar_df_wide_para_ranking(df_dados_brutos) 
+    cols_para_fit = features_finais_raw + [ID_COL, NOTA_ALVO]
+    preprocessor.fit(df_wide_fit[cols_para_fit].fillna(0)) 
 
+    # --------------------------------------------------------
+    # 3. TREINAR O MODELO RFR NO CÓDIGO (Solução contra AtributeError)
+    # --------------------------------------------------------
+    
+    # Prepara os dados para o treinamento no Cloud
+    X_full_transformed = preprocessor.transform(df_wide_fit[cols_para_fit].fillna(0))
+    X = X_full_transformed[:, :-2] 
+    y = df_wide_fit[NOTA_ALVO].fillna(df_wide_fit[NOTA_ALVO].median())
+    
+    # Treina o modelo RFR (replicando os hiperparâmetros de modelagem.py)
+    model = RandomForestRegressor(
+        n_estimators=200, max_depth=None, min_samples_split=5,
+        min_samples_leaf=3, max_features='sqrt', random_state=RANDOM_STATE, n_jobs=-1 
+    )
+    model.fit(X, y)
+    
+    # O objeto model está agora 100% nativo do ambiente Streamlit Cloud
     return model, preprocessor, features_finais_raw
 
 
@@ -495,6 +491,7 @@ with tabs[2]:
 
     else:
         st.warning("Modelos não encontrados. Execute o run_pipeline.py para treinar e serializar os modelos.")
+
 
 
 
