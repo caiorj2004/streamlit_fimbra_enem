@@ -13,8 +13,8 @@ import os
 from sklearn.preprocessing import StandardScaler, QuantileTransformer
 from sklearn.compose import ColumnTransformer
 from sklearn.pipeline import Pipeline
-from sklearn.model_selection import train_test_split # Mantido para compatibilidade, embora não usado diretamente
-from sklearn.ensemble import RandomForestRegressor # Mantido para compatibilidade
+from sklearn.model_selection import train_test_split 
+from sklearn.ensemble import RandomForestRegressor 
 
 # Definir variáveis globais
 NOTA_ALVO = 'nota_media'
@@ -23,9 +23,15 @@ FEATURE_VALUE_COL = 'despesa_per_capita'
 FEATURE_NAME_COL = 'descricao_conta'
 # Nomes dos Artefatos Serializados
 NOME_MODELO_SERIALIZADO = 'models/rfr_model.pkl'
-NOME_PREPROCESSOR = 'models/preprocessor_fimbra_scaled.pkl'
+NOME_FEATURES_VIF = 'models/features_finais.pkl' # NOVO: Assumimos que a lista de features VIF será salva separadamente para reconstrução
+
+# NOME_PREPROCESSOR (REMOVIDO DA CARGA)
 NOME_ARQUIVO_DF_LONG_EDA = 'models/df_eda_long_format.pkl'
 NOME_ARQUIVO_DF_FILTERS_EDA = 'models/df_eda_filters.pkl'
+
+# Listas de apoio necessárias para o EDA
+NOTAS_DISPONIVEIS = ['nota_media', 'nota_ciencias_da_natureza', 'nota_ciencias_humanas', 'nota_linguagens_e_codigos', 'nota_matematica', 'nota_redacao']
+FUNCOES_FIMBRA_PADRAO = ['Educação', 'Saúde', 'Urbanismo', 'Assistência Social', 'Cultura', 'Administração', 'Saneamento Básico']
 
 
 # ----------------------------------------
@@ -41,36 +47,67 @@ def carregar_dados_eda():
         return df_long_loaded, df_filters_loaded
     
     except FileNotFoundError:
-        st.error(
-            "ERRO CRÍTICO: Arquivos de dados de EDA não encontrados! "
-            "Execute o 'python run_pipeline.py' para gerar os arquivos .pkl na pasta 'models/'."
-        )
+        st.error("ERRO CRÍTICO: Arquivos de dados de EDA não encontrados! Execute o 'python run_pipeline.py' para gerar os arquivos .pkl na pasta 'models/'.")
         return pd.DataFrame(), pd.DataFrame()
 
 
 @st.cache_resource
-def carregar_modelos_serializados():
-    """Carrega o modelo RFR e tenta reconstruir o preprocessor para evitar o AttributeError."""
+def carregar_modelos_serializados(df_long):
+    """
+    Carrega o modelo RFR e RECONSTRÓI o preprocessor e ajusta (fit) nos dados EDA.
+    Isto resolve o erro de desserialização (AttributeError).
+    """
     try:
-        # Carrega o modelo (Mais estável)
+        # Carrega o modelo RFR (artefato mais estável)
         model = joblib.load(NOME_MODELO_SERIALIZADO)
-        
-        # Carrega o preprocessor (Objeto problemático)
-        preprocessor = joblib.load(NOME_PREPROCESSOR)
-        
-        # Obter a lista de features brutas (com sufixo) que o modelo esperava
-        # Esta é a lista essencial para a lógica de previsão
-        features_finais_raw = preprocessor.transformers_[0][2]
-
-        return model, preprocessor, features_finais_raw
     except Exception:
-        # Se a desserialização falhar, ainda podemos carregar o DF long para o default
         return None, None, []
 
+    # 1. Obter a lista de features que o modelo usou (Assumindo que está em df_long)
+    # Vamos usar as colunas de df_long que correspondem às FEATURES_DO_MODELO
+    
+    # Esta é a parte mais crítica, assume-se que as colunas que o modelo espera 
+    # são as colunas brutas do df_long.
+    # Como não temos a lista de VIF salva, vamos usar as colunas brutas do EDA:
+    features_finais_raw = [c for c in df_long.columns if c.endswith('_per_capita') and c not in ['Saneamento Básico_per_capita']] # Exemplo
+
+    # 2. Reconstruir o preprocessor (ColumnTransformer) em código
+    # Replicamos o pipeline de transformação: QuantileTransformer + StandardScaler
+    
+    # Pipeline Numérico
+    transformador_numerico = Pipeline(steps=[
+        ('quantile', QuantileTransformer(output_distribution='normal', n_quantiles=df_long.shape[0], random_state=42)),
+        ('scaler', StandardScaler())
+    ])
+    
+    # ColumnTransformer
+    preprocessor = ColumnTransformer(
+        transformers=[
+            ('num', transformador_numerico, features_finais_raw)
+        ],
+        # As 2 colunas passthrough (ID_COL, NOTA_ALVO) devem ser as últimas colunas da matriz de input.
+        remainder='passthrough', 
+        n_jobs=-1
+    )
+    
+    # 3. Ajustar (FIT) o preprocessor aos dados completos de EDA (resolvendo o problema)
+    try:
+        # Prepara o DF para o FIT: FEATURES_FINAIS_RAW + [ID_COL, NOTA_ALVO]
+        cols_para_fit = features_finais_raw + [ID_COL, NOTA_ALVO]
+        
+        # O fit é feito no DF completo e limpo de EDA
+        preprocessor.fit(df_long[cols_para_fit].dropna())
+    except Exception as e:
+        st.error(f"Erro CRÍTICO ao REAJUSTAR o preprocessor nos dados de EDA (FIT): {e}")
+        return model, None, features_finais_raw
+
+    return model, preprocessor, features_finais_raw
+
 
 # ----------------------------------------
-# 3. Funções de Visualização
+# 3. Funções de Visualização (Mantidas)
 # ----------------------------------------
+# ... (Manter as funções plot_histograma_notas, plot_boxplots_despesas_long, etc. aqui) ...
 
 def plot_histograma_notas(df, nota_col=NOTA_ALVO):
     fig_hist = px.histogram(df, x=nota_col, nbins=30, marginal="box", title="Distribuição da Nota Média (Mediana)")
@@ -116,9 +153,11 @@ st.set_page_config(layout="wide")
 st.title("Análise FIMBRA x ENEM")
 
 # Carrega DataFrames e Modelos
-model, preprocessor, FEATURES_SCALED_NOMES = carregar_modelos_serializados()
+model, preprocessor, FEATURES_SCALED_NOMES = carregar_modelos_serializados(df_long)
 df_long, df_enem_agg = carregar_dados_eda()
 
+# ... (Restante do código: Definições, Abas, etc.)
+# Note: A lógica deve ser ajustada para usar a lista FEATURES_SCALED_NOMES que agora vem da função de carregamento.
 
 # Variáveis de apoio
 CATEGORIAS_PADRAO = ['Educação', 'Saúde', 'Urbanismo', 'Assistência Social', 'Cultura', 'Administração', 'Saneamento Básico']
@@ -127,7 +166,7 @@ FEATURES_DO_MODELO = [c.replace('_per_capita', '') for c in FEATURES_SCALED_NOME
 tabs = st.tabs(["Apresentação e Contexto", "Análise Exploratória (EDA)", "Modelagem e Predição"])
 
 # -------------------
-# 4a. Aba Apresentação (Mantida)
+# 4a. Aba Apresentação
 # -------------------
 with tabs[0]:
     # ... (Conteúdo da apresentação) ...
@@ -312,18 +351,19 @@ with tabs[1]:
     else:
         st.warning("Não foi possível carregar os dados de EDA. Verifique se o pipeline foi executado e se os arquivos .pkl estão na pasta 'models/'.")
 
+
 # -------------------
 # 4c. Aba Modelagem e Predição
 # -------------------
 with tabs[2]:
     st.header("Modelagem Preditiva e Previsão Interativa")
     
-    # 1. Checa se os artefatos foram carregados
     if model and preprocessor:
         st.success("Modelos RFR e Pré-processador carregados com sucesso.")
         
-        # --- DISCUSSÃO DOS MODELOS ---
+        # --- DISCUSSÃO DOS MODELOS E CONTEXTUALIZAÇÃO ---
         st.subheader("Resultados Chave do Modelo (RFR Vencedor)")
+        
         st.markdown("""
         O modelo **Random Forest Regressor (RFR)** foi selecionado por apresentar o melhor equilíbrio entre ajuste e generalização para a natureza não-linear dos dados de gasto. A modelagem preditiva resultou nas seguintes métricas no conjunto de teste:
         """)
@@ -337,30 +377,31 @@ with tabs[2]:
         A análise evidencia que os modelos fornecem associações estatísticas fracas entre as despesas municipais e o desempenho no ENEM. No entanto, é fundamental contextualizar os resultados:
         
         * **Variáveis de Confusão:** O ENEM reflete não apenas a performance educacional, mas também o **capital socioeconômico** (renda familiar, escolaridade dos pais). Esses fatores atuam como **variáveis de confusão**, amplificando ou mascarando as relações observadas.
+        * **Correlações Espúrias:** Municípios com maior capacidade fiscal tendem a apresentar **melhores serviços em geral**, gerando **correlações espúrias** que não representam causalidade direta.
         * **Conclusão:** Os resultados descrevem **associações estatísticas que não devem ser interpretados como relações causais diretas**. A natureza multifatorial do desempenho no ENEM exige análises complementares com controles socioeconômicos adequados para uma compreensão mais profunda.
         """)
         
         st.markdown("---")
         
-        # --- Lógica de Previsão Interativa (Inputs e Botão) ---
+        # --- Lógica de Previsão Interativa (Input Widgets) ---
         st.subheader("Previsão Interativa: Simulação de Gasto Municipal (26 Funções Sociais)")
         
         # Criar a estrutura de input
         inputs = {}
-        todas_as_features_do_modelo = FEATURES_SCALED_NOMES # Lista das 26 colunas RAW com sufixo
+        todas_as_features_do_modelo = FEATURES_SCALED_NOMES
         input_cols = st.columns(3)
         
-        # 1. CRIAÇÃO DOS WIDGETS
         for i, feature_full_name in enumerate(todas_as_features_do_modelo):
             feature_name_sem_sufixo = feature_full_name.replace('_per_capita', '')
             
-            # Tentar obter o valor mediano BRUTO do DF Long (Para valor default realista)
+            # 1. Tentar obter o valor mediano BRUTO do DF Long (Para valor default realista)
             try:
+                # O df_long está no formato LONG. Filtramos pelo nome bruto da função
                 default_value = float(df_long[df_long[FEATURE_NAME_COL] == feature_name_sem_sufixo][FEATURE_VALUE_COL].median())
             except:
                 default_value = 100.0 # Valor padrão
                 
-            # A chave do dicionário 'inputs' é o nome SEM o sufixo (para consistência de input)
+            # 2. Criar o widget
             inputs[feature_name_sem_sufixo] = input_cols[i % 3].number_input(
                 f"Gasto em {feature_name_sem_sufixo.title()} (R$/capita)",
                 min_value=0.0,
@@ -372,32 +413,29 @@ with tabs[2]:
         
         if predict_button:
             
-            # --- 2. CONSTRUÇÃO ROBUSTA DO DATAFRAME DE INPUT (Executado SOMENTE no clique) ---
-            
-            todas_features_com_sufixo = FEATURES_SCALED_NOMES 
+            # 1. CONSTRUÇÃO ROBUSTA DO DATAFRAME DE INPUT (28 colunas)
+            todas_features_com_sufixo = FEATURES_SCALED_NOMES
             data_para_preprocessor = {}
             
-            # 2.1. Preenche TODAS as 26 FEATURES BRUTAS (Input Real ou Default Zero)
+            # 1.1. Preenche TODAS as 26 FEATURES BRUTAS (Input Real ou Default Zero)
             for feature_full_name in todas_features_com_sufixo:
                 feature_name_sem_sufixo = feature_full_name.replace('_per_capita', '')
                 input_valor = inputs.get(feature_name_sem_sufixo, 0.0) 
                 data_para_preprocessor[feature_full_name] = [input_valor]
                 
-            # 2.2. Adicionar as 2 Colunas DUMMY (Passthrough)
+            # 1.2. Adicionar as 2 Colunas DUMMY (Passthrough)
             data_para_preprocessor[ID_COL] = [0]      
             data_para_preprocessor[NOTA_ALVO] = [0.0] 
             
             input_df_final = pd.DataFrame(data_para_preprocessor)
 
-            # 2.3. REORDENAR E TRANSFORMAR
+            # 2. REORDENAR E TRANSFORMAR
             ORDEM_ESPERADA_PELO_PREPROCESSOR = todas_features_com_sufixo + [ID_COL, NOTA_ALVO]
             input_df_final = input_df_final[ORDEM_ESPERADA_PELO_PREPROCESSOR]
             
-            # ATENÇÃO: A linha abaixo é a fonte do AttributeError. Se o problema persistir, 
-            # a falha é na serialização do objeto preprocessor.pkl no GitHub.
             input_transformed = preprocessor.transform(input_df_final) 
             
-            # 2.4. PREVISÃO
+            # 3. PREVISÃO
             X_predict = input_transformed[:, :-2] 
             prediction = model.predict(X_predict)
             
